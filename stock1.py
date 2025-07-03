@@ -3,9 +3,11 @@ import holidays
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from ta.trend import SMAIndicator, EMAIndicator, MACD
+from datetime import datetime, timedelta, date
+from datetime import datetime, date
+from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator
 from ta.volatility import BollingerBands
+from ta.momentum import RSIIndicator
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, mean_absolute_percentage_error
@@ -16,16 +18,31 @@ st.set_page_config(page_title="Stock App", layout="wide")
 # Title
 st.title("📈 Stock Market Dashboard")
 
+from datetime import datetime, date, timedelta
+import streamlit as st
+
 # Sidebar Inputs
 ticker = st.sidebar.text_input("Enter Stock Ticker (e.g., TCS.NS)", value="TCS.NS")
 
-default_end_date = datetime.today().date()
-end_date = st.sidebar.date_input("Select End Date (last day of training data)", value=default_end_date)
+today = datetime.today().date()
+# Let user select end date, but restrict to today or earlier
+end_date = st.sidebar.date_input(
+    "Select End Date (last day of training data)",
+    value=today,
+    max_value=today
+)
 
-# Automatically calculate start_date using a fixed window
-# Use 270 calendar days to ensure ~180 valid trading days
+# Defensive check (in case someone hacks the URL to pass future dates)
+if end_date > today:
+    st.sidebar.error("❌ End date cannot be in the future.")
+    st.stop()
+
 start_date = end_date - timedelta(days=270)
-st.sidebar.info(f"Using last 270 calendar days (from {start_date} to {end_date}) for model training")
+
+# Show info message
+st.sidebar.info(
+    f"Using last 270 calendar days (from {start_date} to {end_date}) for model training"
+)
 date_validation_passed = True
 
 # Fetch stock data with NSE holidays and weekends removed
@@ -74,26 +91,42 @@ def fetch_stock_data(ticker, start_date, end_date):
 
     return df, company_name
 
-# Apply indicators based on chosen tier
+# Apply Technical indicators 
 def add_technical_indicators(df):
     df = df.copy()
-
+    
+    #EMA12 and EMA26
     df['EMA_12'] = EMAIndicator(close=df['Close'], window=12).ema_indicator()
     df['EMA_26'] = EMAIndicator(close=df['Close'], window=26).ema_indicator()
 
+    # MACD
     macd = MACD(close=df['Close'])
     df['MACD'] = macd.macd()
     df['MACD_Signal'] = macd.macd_signal()
 
+    # RSI
+    df['RSI_14'] = RSIIndicator(close=df['Close'], window=14).rsi()
+
+    # Bollinger Bands
     bb = BollingerBands(close=df['Close'], window=20, window_dev=2)
     df['BB_upper'] = bb.bollinger_hband()
     df['BB_lower'] = bb.bollinger_lband()
     df['BB_middle'] = bb.bollinger_mavg()
 
-    return df.dropna()
+    # ADX
+    adx = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+    df['ADX_14'] = adx.adx()
 
+    df.dropna(inplace=True)
+    return df
+
+#Feature engineering 
 def prepare_features_for_regression(df):
     df = df.copy()
+
+    # Calendar-Time Features
+    df['DayOfWeek'] = df.index.dayofweek  # 0 = Monday, 4 = Friday
+    df['Month'] = df.index.month
 
     # LAG FEATURES (last 3 days)
     for lag in range(1, 4):
@@ -108,6 +141,7 @@ def prepare_features_for_regression(df):
 
     # DAILY RETURNS
     df['Return_1d'] = df['Close'].pct_change()
+    df['Return_5d'] = df['Close'].pct_change(5)
     df['LogReturn_1d'] = (df['Close'] / df['Close'].shift(1)).apply(lambda x: np.log(x) if x > 0 else 0)
 
     # NEW ENGINEERED FEATURES
@@ -122,6 +156,15 @@ def prepare_features_for_regression(df):
     for horizon in range(1, 4):
         df[f'Target_Close_{horizon}d'] = df['Close'].shift(-horizon)
 
+    # Bollinger Band Position (%)
+    df['Bollinger_Position'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower']).replace(0, np.nan)
+
+    # 10-day Range Position
+    rolling_max = df['Close'].rolling(window=10).max()
+    rolling_min = df['Close'].rolling(window=10).min()
+    df['RangePos_10d'] = (df['Close'] - rolling_min) / (rolling_max - rolling_min).replace(0, np.nan)
+
+    df.dropna(inplace=True) 
     return df
 
 nse_holidays = holidays.India(years=range(2020, 2035))  # Wider range if needed
@@ -138,11 +181,18 @@ def train_xgboost_model(df, end_date, n_days=1):
     df = df.copy()
     
     feature_cols = [
-    'Open', 'High', 'Low', 'Close', 'Volume', 
-    'EMA_12', 'EMA_26', 'MACD', 'MACD_Signal', 
-    'LogReturn_1d', 'BB_upper', 'BB_middle', 'BB_lower',
+    'Open', 'High', 'Low', 'Close', 'Volume',
+    'EMA_12', 'EMA_26', 'MACD', 'MACD_Signal',
+    'BB_upper', 'BB_middle', 'BB_lower',
+    'Bollinger_Position', 'RangePos_10d',
+    'RSI_14', 'ADX_14',
+    'RollingMean_3', 'RollingStd_3', 'RollingMean_7', 'RollingStd_7',
+    'Return_1d', 'Return_5d', 'LogReturn_1d',
+    'VolumeRatio_5','Volatility_5d',
     'DailyRange', 'PriceGap', 'PositionInRange',
-    'VolumeRatio_5', 'Volatility_5d', 'IsBullish']
+    'Close_lag_1', 'Close_lag_2', 'Close_lag_3',
+    'Volume_lag_1', 'Volume_lag_2', 'Volume_lag_3',
+    'DayOfWeek', 'Month', 'IsBullish']
 
     df.dropna(subset=feature_cols, inplace=True)
     df['Target'] = df['Close'].shift(-1)
@@ -190,8 +240,7 @@ def train_xgboost_model(df, end_date, n_days=1):
     mape = mean_absolute_percentage_error(y_test, y_pred)
     accuracy = 100 - (mape * 100)
 
-    st.markdown(f"""
-    **🔧 Best Parameters Chosen:** `{grid_search.best_params_}`  
+    st.markdown(f""" 
     **📊 Model Evaluation on Test Set:**  
     - MAE: `{mae:.4f}`  
     - RMSE: `{rmse:.4f}`  
