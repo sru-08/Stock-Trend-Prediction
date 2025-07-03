@@ -4,7 +4,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, date
-from datetime import datetime, date
 from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
@@ -247,6 +246,26 @@ def train_xgboost_model(df, end_date, n_days=1):
     - R²: `{r2:.4f}`  
     - Accuracy (100 - MAPE): `{accuracy:.2f}%`
     """)
+
+    # After model predictions and metrics
+    # Compute naive predictions (previous day's close)
+    naive_pred = X_test['Close_lag_1'].values  # Naive: predict previous day's close
+    y_test_actual = y_test.values
+    # Metrics for naive model
+    mae_naive = mean_absolute_error(y_test_actual, naive_pred)
+    rmse_naive = np.sqrt(mean_squared_error(y_test_actual, naive_pred))
+    r2_naive = r2_score(y_test_actual, naive_pred)
+    mape_naive = mean_absolute_percentage_error(y_test_actual, naive_pred)
+
+    # Display comparison as a DataFrame for better side-by-side view
+    metrics_data = {
+        'Metric': ['MAE', 'RMSE', 'R²', 'MAPE'],
+        'XGBoost': [f'{mae:.2f}', f'{rmse:.2f}', f'{r2:.3f}', f'{mape:.2f}'],
+        'Naive': [f'{mae_naive:.2f}', f'{rmse_naive:.2f}', f'{r2_naive:.3f}', f'{mape_naive:.2f}']
+    }
+    metrics_df = pd.DataFrame(metrics_data)
+    st.subheader('📉 Model vs. Naive Comparison (Test Set)')
+    st.dataframe(metrics_df, hide_index=True)
 
     # Forecasting
     if isinstance(end_date, datetime):
